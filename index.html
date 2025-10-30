@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Documentos – SESAL HND</title>
+<style>
+  body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial; margin:24px; color:#111827}
+  h1{margin:0 0 6px} .muted{color:#6b7280}
+  .top{display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:10px 0 14px}
+  input[type="search"]{padding:8px 10px; border:1px solid #e5e7eb; border-radius:8px; min-width:220px}
+  .btn{border:1px solid #e5e7eb; background:#fff; border-radius:8px; padding:8px 10px; cursor:pointer}
+  .btn:hover{background:#f8fafc}
+  .crumbs{margin:6px 0 12px; color:#374151}
+  .crumbs a{text-decoration:none}
+  table{width:100%; border-collapse:collapse}
+  th,td{padding:10px 8px; border-bottom:1px solid #f1f5f9; text-align:left; vertical-align:middle}
+  th{background:#f8fafc; font-weight:600}
+  .folder{font-weight:600}
+  .badge{display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; background:#f1f5f9}
+  .empty{color:#6b7280; padding:16px 0}
+  .error{color:#b91c1c; background:#fef2f2; border:1px solid #fecaca; padding:10px 12px; border-radius:8px; margin:12px 0}
+  @media (max-width:700px){ .hide-sm{display:none} table{font-size:14px} }
+</style>
+</head>
+<body>
+
+<h1>📂 Documentos – SESAL HND</h1>
+<div class="muted">Navega las carpetas y descarga archivos.</div>
+
+<div id="crumbs" class="crumbs"></div>
+
+<div class="top">
+  <button id="upBtn" class="btn">↪️ Regresar</button>
+  <input id="q" type="search" placeholder="Buscar por nombre…"/>
+</div>
+
+<div id="alert"></div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Nombre</th>
+      <th class="hide-sm">Tipo</th>
+      <th class="hide-sm">Tamaño</th>
+      <th>Acción</th>
+    </tr>
+  </thead>
+  <tbody id="tbody"><tr><td colspan="4">Cargando…</td></tr></tbody>
+</table>
+<div id="empty" class="empty" style="display:none">No hay elementos para mostrar.</div>
+
+<script>
+const OWNER  = "cvalle2024";
+const REPO   = "Documentos-Normativos-SESAL-HND";
+let   BRANCH = "main";
+const START_PATH = "";
+
+const tbody   = document.getElementById("tbody");
+const emptyEl = document.getElementById("empty");
+const alertEl = document.getElementById("alert");
+const qInput  = document.getElementById("q");
+const crumbs  = document.getElementById("crumbs");
+
+function getParamPath(){
+  const p = new URLSearchParams(location.search).get("path");
+  return p ? decodeURIComponent(p) : (START_PATH || "");
+}
+function setParamPath(p){
+  const url = new URL(location.href);
+  if (p) url.searchParams.set("path", p); else url.searchParams.delete("path");
+  history.replaceState(null,"",url);
+}
+function encPath(p){
+  return p.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+}
+function rawUrl(path){
+  return `https://raw.githubusercontent.com/${OWNER}/${REPO}/${BRANCH}/${encPath(path)}`;
+}
+function ghFolderUrl(path){
+  const base = `https://github.com/${OWNER}/${REPO}/tree/${BRANCH}`;
+  return path ? `${base}/${encPath(path)}` : base;
+}
+function fmtSize(bytes){
+  if (bytes == null) return "";
+  const u=["B","KB","MB","GB","TB"]; let i=0, v=bytes;
+  while(v>=1024 && i<u.length-1){ v/=1024; i++; }
+  return `${v.toFixed(v<10?1:0)} ${u[i]}`;
+}
+function renderCrumbs(path){
+  if(!path){ crumbs.innerHTML = `<strong>Ruta:</strong> <a href="?">/</a>`; return; }
+  const parts = path.split("/").filter(Boolean);
+  let acc = [];
+  let out = [`<strong>Ruta:</strong> <a href="?">/</a>`];
+  for(const part of parts){
+    acc.push(part);
+    out.push(`<a href="?path=${encodeURIComponent(acc.join("/"))}">${part}</a>`);
+  }
+  crumbs.innerHTML = out.join(" / ");
+}
+function showError(msg){
+  alertEl.innerHTML = `<div class="error">${msg}</div>`;
+}
+function clearError(){ alertEl.innerHTML=""; }
+
+async function fetchContents(path){
+  const url = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${encPath(path)}?ref=${BRANCH}`;
+  let res = await fetch(url);
+  if(res.status===404 && BRANCH==="main"){
+    BRANCH = "master";
+    const url2 = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${encPath(path)}?ref=${BRANCH}`;
+    res = await fetch(url2);
+  }
+  if(!res.ok){
+    let msg = `No se pudo cargar el contenido (HTTP ${res.status}).`;
+    if(res.status===403){
+      const rem = res.headers.get("x-ratelimit-remaining");
+      const rst = res.headers.get("x-ratelimit-reset");
+      if(rem === "0" && rst){
+        const mins = Math.max(0, Math.round((parseInt(rst,10)*1000 - Date.now())/60000));
+        msg = `Has alcanzado el límite público de la API de GitHub. Intenta de nuevo en ~${mins} min.`;
+      } else {
+        msg = `Acceso restringido por GitHub (403). Verifica que el repositorio sea público.`;
+      }
+    } else if(res.status===404){
+      msg = `Ruta no encontrada. Verifica la carpeta o la rama (${BRANCH}).`;
+    }
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+function render(items, path){
+  items = items.filter(it => it.name.toLowerCase() !== "index.html");
+  const needle = (qInput.value||"").toLowerCase().trim();
+  let filtered = items;
+  if(needle) filtered = items.filter(it => it.name.toLowerCase().includes(needle));
+
+  filtered.sort((a,b)=>{
+    if(a.type!==b.type) return a.type==="dir" ? -1 : 1;
+    return a.name.localeCompare(b.name,"es");
+  });
+
+  if(!filtered.length){
+    tbody.innerHTML = "";
+    emptyEl.style.display = "block";
+    return;
+  }
+  emptyEl.style.display = "none";
+
+  tbody.innerHTML = "";
+  for(const it of filtered){
+    const tr = document.createElement("tr");
+
+    // Nombre
+    const name = document.createElement("td");
+    if(it.type==="dir"){
+      const a = document.createElement("a");
+      a.textContent = it.name + "/";
+      a.className = "folder";
+      a.href = "javascript:void(0)";
+      a.onclick = () => {
+        const next = (path ? path + "/" : "") + it.name;
+        setParamPath(next);
+        load();
+      };
+      name.appendChild(a);
+    } else {
+      const a = document.createElement("a");
+      a.textContent = it.name;
+      a.href = rawUrl((path ? path + "/" : "") + it.name);
+      a.setAttribute("download", it.name);
+      a.target = "_blank";
+      name.appendChild(a);
+    }
+    tr.appendChild(name);
+
+    // Tipo
+    const type = document.createElement("td");
+    type.className = "hide-sm";
+    type.innerHTML = `<span class="badge">${it.type==="dir"?"Carpeta":"Archivo"}</span>`;
+    tr.appendChild(type);
+
+    // Tamaño
+    const size = document.createElement("td");
+    size.className = "hide-sm";
+    size.textContent = it.type==="file" ? fmtSize(it.size) : "";
+    tr.appendChild(size);
+
+    // Acción
+    const act = document.createElement("td");
+    if(it.type==="file"){
+      const down = document.createElement("a");
+      down.href = rawUrl((path ? path + "/" : "") + it.name);
+      down.setAttribute("download", it.name);
+      down.textContent = "Descargar";
+      down.target = "_blank";
+      act.appendChild(down);
+    } else {
+      const open = document.createElement("a");
+      open.href = ghFolderUrl((path ? path + "/" : "") + it.name);
+      open.textContent = "Abrir";
+      open.target = "_blank";
+      act.appendChild(open);
+    }
+    tr.appendChild(act);
+
+    tbody.appendChild(tr);
+  }
+}
+
+async function load(){
+  clearError();
+  const path = getParamPath();
+  renderCrumbs(path);
+  tbody.innerHTML = `<tr><td colspan="4">Cargando…</td></tr>`;
+  try{
+    const data = await fetchContents(path);
+    if(!Array.isArray(data)){
+      throw new Error("Respuesta inesperada de GitHub.");
+    }
+    render(data, path);
+  }catch(err){
+    tbody.innerHTML = "";
+    emptyEl.style.display = "none";
+    showError(err.message);
+  }
+}
+
+document.getElementById("upBtn").onclick = ()=>{
+  const path = getParamPath();
+  if(!path) return;
+  const parts = path.split("/").filter(Boolean);
+  parts.pop();
+  const prev = parts.join("/");
+  setParamPath(prev);
+  load();
+};
+qInput.addEventListener("input", load);
+
+load();
+</script>
+</body>
+</html>
+
+
+
